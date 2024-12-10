@@ -7,6 +7,7 @@ import plotly.graph_objects as go
 from levseq_vis_dev.seqfit import (
     normalise_calculate_stats,
     process_plate_files,
+    append_xy,
     prep_aa_order,
     prep_single_ssm,
     get_parent2sitedict,
@@ -29,6 +30,7 @@ config = {
         "format": "svg",  # Set the download format to SVG
     }
 }
+
 
 def _max_width_():
     max_width_str = f"max-width: 1800px;"
@@ -275,7 +277,7 @@ def plot_bar_point(
 
         # Define bar line styles conditionally
         bar_lines = [
-            {"color": "black", "width": 2}
+            {"color": "gray", "width": 2}
             if val == highlight_label
             else {"color": "white", "width": 0}
             for val in bar_data[x]
@@ -487,6 +489,71 @@ def plot_single_ssm_avg(single_ssm_df, ys):
         st.plotly_chart(fig, config=config)
 
 
+def plot_embxy(df: pd.DataFrame, product: str):
+
+    """
+    Function to plot the x, y embedding coordinates colored by a specified metric using Plotly.
+
+    Args:
+    - df : pd.DataFrame
+        A pandas DataFrame containing the data for the x, y embedding coordinates.
+    - product : str
+        The column name to be used for coloring the scatter plot.
+
+    Returns:
+    - fig : plotly.graph_objs.Figure
+        A Plotly figure object containing the scatter plot.
+    """
+
+    # Create a scatter plot using Plotly Express
+    fig = px.scatter(
+        df,
+        x="x_coordinate",
+        y="y_coordinate",
+        color=product,
+        hover_data=["ID", "amino-acid_substitutions", "Parent_Name"],
+        title=f"{product} in sequence embedding space",
+        color_continuous_scale="RdBu_r",
+        labels={
+            "x_coordinate": "Embedding x",
+            "y_coordinate": "Embedding y",
+            product: product,
+        },
+    )
+    # Customize layout
+    fig.update_layout(
+        width=800,
+        height=600,
+        coloraxis_colorbar={"title": product},
+    )
+    return fig
+
+
+def agg_embxy(df: pd.DataFrame, products: list):
+    """
+    Function to aggregate the x, y embedding coordinates colored by different metrics using Plotly.
+
+    Args:
+    - df : pd.DataFrame
+        A pandas DataFrame containing the data for the x, y embedding coordinates.
+    - products : list
+        A list of column names for which the x, y embedding coordinates are to be colored.
+
+    Returns:
+    - figs : list
+        A list of Plotly figure objects containing the scatter plots.
+    """
+
+    plots = [plot_embxy(df, product) for product in products if product in df.columns]
+
+    if not plots:
+        return None
+
+    # Display plots in Streamlit
+    for plot in plots:
+        st.plotly_chart(plot, config=config)
+
+
 def seqfit_runner():
     st.info(f"Running LevSeq using your files! Results will appear below shortly.")
 
@@ -497,7 +564,7 @@ def seqfit_runner():
     # Process variants
     df = process_plate_files(
         products=products, fit_df=fit_df, seq_df=seq_variant, plate_names=plate_names
-    )
+    ).copy()
 
     fold_products = [f"{p}_fold" for p in products]
     parents_list = df["Parent_Name"].unique()
@@ -544,13 +611,18 @@ def seqfit_runner():
     single_ssm_df = prep_single_ssm(df)
     plot_single_ssm_avg(single_ssm_df, ys=fold_products)
 
-    # # Generate single SSM plots
+    # Generate single SSM plots
     st.header("Single SSM Heatmap")
     agg_mut_plot(
         sites_dict=get_parent2sitedict(single_ssm_df),
         single_ssm_df=single_ssm_df,
         ys=fold_products,
     )
+
+    # Generate embedding plot
+    st.header("Sequence Embedding")
+    st.subheader("esm2_t12_35M_UR50D PCA (will take a while)")
+    agg_embxy(append_xy(df, products=fold_products), products=fold_products)
 
     st.subheader("Done LevSeq!")
 

@@ -40,6 +40,10 @@ This shows the fitness values of all variants averaged across each single amino 
 This shows the fitness values of all variants averaged across each single amino acid subsitution for each given site of a given parent. Most useful for SSM data.
 ![align](images/ssm_per_site.png)
 
+### Sequence embedding PCA
+This shows the PCA of the sequence embeddings for each variant colored by the fitness value.
+![align](images/emb_pca.png)
+
 ## Please provide feedback
 Leave a feature request in the issues or on [LevSeq](https://github.com/fhalab/LevSeq) . 
 

@@ -10,3 +10,5 @@ ninetysix
 scikit-learn
 statsmodels
 tqdm
+fair-esm
+torch

@@ -13,6 +13,11 @@ from tqdm import tqdm
 import pandas as pd
 import numpy as np
 
+from sklearn.decomposition import PCA
+
+import esm
+import torch
+
 import ninetysix as ns
 
 
@@ -40,6 +45,16 @@ AA_DICT = {
     "Tyr": "Y",
     "Ter": "*",
 }
+
+
+ALL_AAS = list(AA_DICT.values())
+AA_NUMB = len(ALL_AAS)
+
+# Create a dictionary that links each amino acid to an index
+AA_TO_IND = {aa: i for i, aa in enumerate(ALL_AAS)}
+
+# Set up cuda variables
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def normalise_calculate_stats(
@@ -553,6 +568,149 @@ def process_mutation(mutation: str) -> pd.Series:
             details.append((None, None, None))
 
     return pd.Series([num_sites, details])
+
+
+def up2stopcodon(sequence: str) -> str:
+
+    """
+    Preprocesses the amino acid sequence
+    by removing everything after the first '*' (stop codon).
+    """
+
+    if "*" in sequence:
+        sequence = sequence.split("*")[0]  # Take everything before the first '*'
+    return sequence
+
+
+def get_max_layer(model_name: str) -> int:
+    """
+    Get the maximum layer number for the specified model.
+
+    ie esm1_t6_43M_UR50S has 6 layers
+    esm2_t12_35M_UR50D has 12 layers
+    """
+
+    return int(model_name.split("_")[1][1:])
+
+
+def append_xy(
+    df: pd.DataFrame,
+    products: list,
+    model_name="esm2_t12_35M_UR50D",
+    output_file=None,
+    batch_size=32,
+):
+
+    # Remove the "Unnamed: 0" column if it exists
+    if "Unnamed: 0" in df.columns:
+        df = df.drop(columns=["Unnamed: 0"])
+
+    # Create the ID column as the combination of `Plate` and `Well`
+    df["ID"] = df["Plate"] + "-" + df["Well"]
+    df = df[
+        ["ID"] + [col for col in df.columns if col != "ID"]
+    ]  # Reorder to make ID the first column
+
+    # Filter valid sequences from the `aa_sequence` column
+    df = (
+        df[df["Type"].isin(["Parent", "Variant", "Truncated"])]
+        .dropna(subset=["aa_sequence"])
+        .copy()
+    )
+
+    # Preprocess sequences to handle stop codons
+    df["processed_aa_sequence"] = df["aa_sequence"].apply(up2stopcodon)
+
+    if "esm" in model_name:
+
+        max_layer = get_max_layer(model_name)
+
+        # Load the ESM-2 model
+        model, alphabet = esm.pretrained.load_model_and_alphabet_hub(model_name)
+        batch_converter = alphabet.get_batch_converter()
+
+        model.eval()  # disable dropout for deterministic results
+        model.to(DEVICE)
+
+        # Prepare sequences for embedding
+        # Extract data into the desired format
+        formatted_data = [
+            (row["ID"], row["processed_aa_sequence"]) for _, row in df.iterrows()
+        ]
+
+        # Initialize results
+        all_sequence_representations = []
+        all_batch_labels = []
+
+        # Process in batches
+        for i in tqdm(range(0, len(formatted_data), batch_size)):
+            batch = formatted_data[i : i + batch_size]
+            batch_labels, batch_strs, batch_tokens = batch_converter(batch)
+            batch_tokens = batch_tokens.to(DEVICE)
+
+            with torch.no_grad():
+                token_representations = (
+                    model(batch_tokens, repr_layers=[max_layer], return_contacts=False)[
+                        "representations"
+                    ][max_layer]
+                    .cpu()
+                    .numpy()
+                )
+
+            for j, tokens_len in enumerate(
+                (batch_tokens != alphabet.padding_idx).sum(1)
+            ):
+                all_sequence_representations.append(
+                    token_representations[j, 1 : tokens_len - 1].mean(0)
+                )
+                all_batch_labels.append(batch_labels[j])
+
+            # Clear memory after each batch
+            torch.cuda.empty_cache()
+
+        # Convert the embeddings to a numpy array
+        sequence_embeddings = np.array(all_sequence_representations)
+
+        print(f"Number of sequences: {len(all_batch_labels)}")
+
+    # all else do onehot
+    else:
+        all_sequence_representations = []
+
+        for seq in tqdm(df["processed_aa_sequence"].tolist()):
+            # padding: (top, bottom), (left, right)
+            all_sequence_representations.append(
+                np.pad(
+                    np.array(np.eye(AA_NUMB)[[AA_TO_IND[aa] for aa in seq]]),
+                    pad_width=(
+                        (0, df["processed_aa_sequence"].apply(len).max() - len(seq)),
+                        (0, 0),
+                    ),
+                )
+            )
+
+        # flatten emb
+        all_sequence_representations = np.array(all_sequence_representations)
+        # encoded_mut_seqs.reshape(encoded_mut_seqs.shape[0], -1)
+        sequence_embeddings = all_sequence_representations.reshape(
+            np.array(all_sequence_representations).shape[0], -1
+        )
+        all_batch_labels = df["ID"].tolist()
+
+    print(f"sequence_embeddings shape: {sequence_embeddings.shape}")
+
+    # Dimensionality Reduction using PCA
+    pca = PCA(n_components=2)
+    xy_coordinates = pca.fit_transform(sequence_embeddings)
+
+    # Add x, y coordinates back to the dataframe
+    xy_df = pd.DataFrame(
+        xy_coordinates, columns=["x_coordinate", "y_coordinate"], index=all_batch_labels
+    ).rename_axis("ID")
+
+    return pd.merge(
+        df.set_index("ID"), xy_df, left_index=True, right_index=True, how="left"
+    ).reset_index()
 
 
 def prep_single_ssm(df: pd.DataFrame) -> pd.DataFrame:
